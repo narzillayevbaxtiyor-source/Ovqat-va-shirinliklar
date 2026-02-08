@@ -104,7 +104,7 @@ def now_iso():
     return datetime.utcnow().isoformat(timespec="seconds")
 
 def fmt_money(x: float) -> str:
-    # 25 -> "25", 25.5 -> "25.5"
+    # 25 -> "25 SAR", 25.5 -> "25.5 SAR"
     try:
         if float(x).is_integer():
             return f"{int(x)} SAR"
@@ -973,7 +973,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
-        per_message=True,  # ✅ HOZIR knopkasi callback'larini barqaror qiladi
+        per_message=False,  # ✅ TUZATILDI: "Hozir" knopkasi callback'lari endi barqaror ishlaydi
     )
 
     app.add_handler(conv)
