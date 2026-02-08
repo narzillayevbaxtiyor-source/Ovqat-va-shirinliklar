@@ -103,6 +103,15 @@ def status_label(st: str) -> str:
 def now_iso():
     return datetime.utcnow().isoformat(timespec="seconds")
 
+def fmt_money(x: float) -> str:
+    # 25 -> "25", 25.5 -> "25.5"
+    try:
+        if float(x).is_integer():
+            return f"{int(x)} SAR"
+    except Exception:
+        pass
+    return f"{x} SAR"
+
 # ====== States ======
 (
     ADMIN_MENU,
@@ -124,8 +133,7 @@ def now_iso():
     ADMIN_EDIT_MINMAX,
     ADMIN_EDIT_PHOTO1,
     ADMIN_EDIT_PHOTO2,
-    CUSTOMER_CANCEL_CONFIRM,
-) = range(20)
+) = range(19)
 
 # ====== Keyboards ======
 def kb_admin_main():
@@ -193,6 +201,13 @@ def kb_contact_reply():
         resize_keyboard=True,
         one_time_keyboard=True,
     )
+
+def kb_schedule_inline():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
+         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
+        [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
+    ])
 
 # ====== CUSTOMER: cancel / main menu ======
 async def cust_cancel_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -350,7 +365,7 @@ async def admin_show_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt = (
             f"#{r['id']} — *{r['title']}*\n"
             f"{r['description']}\n"
-            f"💰 Narx: *{r['price']}*\n"
+            f"💰 Narx: *{fmt_money(r['price'])}*\n"
             f"🔢 Min/Max: *{r['min_qty']}–{r['max_qty']}*\n"
             f"🟢 Aktiv: {'Ha' if r['is_active'] else 'Yo‘q'}"
         )
@@ -429,7 +444,7 @@ async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("UPDATE items SET price=? WHERE id=?", (price, item_id))
     con.commit(); con.close()
 
-    await update.message.reply_text(f"✅ Mahsulot #{item_id} narxi yangilandi: {price}", reply_markup=kb_admin_main())
+    await update.message.reply_text(f"✅ Mahsulot #{item_id} narxi yangilandi: {fmt_money(price)}", reply_markup=kb_admin_main())
     context.user_data.pop("edit_item_id", None)
     return ADMIN_MENU
 
@@ -510,7 +525,7 @@ async def cust_pick_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🛒 Buyurtma", callback_data=f"cust:item:{it['id']}")]
         ])
         await q.message.reply_text(
-            f"*{it['title']}*\n{it['description']}\n💰 Narx: *{it['price']}*",
+            f"*{it['title']}*\n{it['description']}\n💰 Narx: *{fmt_money(it['price'])}*",
             parse_mode=ParseMode.MARKDOWN,
             reply_markup=kb
         )
@@ -534,6 +549,8 @@ async def cust_open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "qty": it["min_qty"],
         "min_qty": it["min_qty"],
         "max_qty": it["max_qty"],
+        "unit_price": float(it["price"]),
+        "title": it["title"],
         "delivery_type": None,
         "address_text": None,
         "lat": None,
@@ -545,6 +562,8 @@ async def cust_open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "scheduled_time_text": None,
     }
 
+    total = float(it["price"]) * int(it["min_qty"])
+
     await context.bot.send_media_group(
         chat_id=q.message.chat_id,
         media=[
@@ -552,7 +571,9 @@ async def cust_open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 it["photo1_file_id"],
                 caption=(
                     f"*{it['title']}*\n{it['description']}\n"
-                    f"💰 Narx: *{it['price']}*\n"
+                    f"💰 Bir dona: *{fmt_money(it['price'])}*\n"
+                    f"🔢 Soni: *{it['min_qty']}*\n"
+                    f"🧾 Jami: *{fmt_money(total)}*\n"
                     f"🔢 Min/Max: *{it['min_qty']}–{it['max_qty']}*"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
@@ -577,7 +598,10 @@ async def cust_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CUSTOMER_BROWSE
 
     if data == "next":
-        await q.message.reply_text("Yetkazib berish uchun lokatsiya yuboring yoki manzilni qo‘lda yozing:", reply_markup=kb_delivery_reply())
+        await q.message.reply_text(
+            "Yetkazib berish uchun lokatsiya yuboring yoki manzilni qo‘lda yozing:",
+            reply_markup=kb_delivery_reply()
+        )
         return CUSTOMER_DELIVERY
 
     try:
@@ -590,6 +614,15 @@ async def cust_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CUSTOMER_PICK_QTY
 
     od["qty"] = chosen
+
+    # ✅ son o'zgarganda jami narx ham yangilanadi
+    total = float(od.get("unit_price", 0.0)) * int(chosen)
+
+    try:
+        await q.message.reply_text(f"🧾 Jami narx: *{fmt_money(total)}*", parse_mode=ParseMode.MARKDOWN)
+    except Exception:
+        pass
+
     await q.message.edit_reply_markup(reply_markup=kb_qty(od["min_qty"], od["max_qty"], chosen))
     return CUSTOMER_PICK_QTY
 
@@ -652,12 +685,7 @@ async def cust_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Telefon yuboring yoki @username yozing.", reply_markup=kb_contact_reply())
             return CUSTOMER_CONTACT
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
-         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
-        [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
-    ])
-    await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb)
+    await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb_schedule_inline())
     return CUSTOMER_SCHEDULE
 
 async def cust_username_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -669,12 +697,7 @@ async def cust_username_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     od["contact_type"] = "username"
     od["tg_username"] = txt
 
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
-         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
-        [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
-    ])
-    await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb)
+    await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb_schedule_inline())
     return CUSTOMER_SCHEDULE
 
 async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -692,7 +715,11 @@ async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         od["scheduled_time_text"] = None
         return await finalize_order(q.message, context)
 
-    await q.message.reply_text("Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_delivery_reply())
+    await q.message.reply_text(
+        "Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):",
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_delivery_reply()
+    )
     return CUSTOMER_SCHEDULE_TIME
 
 async def cust_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -718,6 +745,9 @@ async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
         con.close()
         await message.reply_text("❌ Mahsulot topilmadi.")
         return CUSTOMER_BROWSE
+
+    unit_price = float(it["price"])
+    total_price = unit_price * int(od["qty"])
 
     created = now_iso()
     cur.execute("""
@@ -751,7 +781,8 @@ async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
         f"👤 Mijoz: *{u.first_name}* (@{u.username})" if u.username else f"👤 Mijoz: *{u.first_name}*",
         f"🍽 Mahsulot: *{it['title']}* (#{it['id']})",
         f"🔢 Soni: *{od['qty']}*",
-        f"💰 Narx: *{it['price']}*",
+        f"💰 Bir dona: *{fmt_money(unit_price)}*",
+        f"🧾 Jami: *{fmt_money(total_price)}*",
         f"⏱ Vaqt: *{'Hozir' if od['schedule_type']=='now' else od['scheduled_time_text']}*",
     ]
     if od["delivery_type"] == "location":
@@ -875,10 +906,10 @@ def main():
         entry_points=[CommandHandler("start", start)],
         states={
             # ADMIN
-            ADMIN_MENU: [CallbackQueryHandler(callback_router)],
+            ADMIN_MENU: [CallbackQueryHandler(callback_router, block=False)],
 
             ADMIN_ADD_TITLE: [
-                CallbackQueryHandler(callback_router),
+                CallbackQueryHandler(callback_router, block=False),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_title),
             ],
             ADMIN_ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_desc)],
@@ -894,12 +925,12 @@ def main():
 
             # CUSTOMER
             CUSTOMER_BROWSE: [
-                CallbackQueryHandler(callback_router),
+                CallbackQueryHandler(callback_router, block=False),
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), start),
             ],
 
             CUSTOMER_PICK_QTY: [
-                CallbackQueryHandler(callback_router),
+                CallbackQueryHandler(callback_router, block=False),
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
                 MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
             ],
@@ -929,7 +960,7 @@ def main():
             ],
 
             CUSTOMER_SCHEDULE: [
-                CallbackQueryHandler(callback_router),
+                CallbackQueryHandler(callback_router, block=False),
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
                 MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
             ],
@@ -942,6 +973,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
+        per_message=True,  # ✅ HOZIR knopkasi callback'larini barqaror qiladi
     )
 
     app.add_handler(conv)
