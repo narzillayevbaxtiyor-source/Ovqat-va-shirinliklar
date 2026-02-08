@@ -234,6 +234,17 @@ async def cust_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
     return CUSTOMER_BROWSE
 
+# ✅ "🟢 Hozir" matn bo‘lib kelsa ham ishlashi uchun (INLINE callback ba’zan yutilib qoladi)
+async def cust_schedule_now_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    od = context.user_data.get("order")
+    if not od:
+        await update.message.reply_text("Buyurtma topilmadi. /start qiling.")
+        return CUSTOMER_BROWSE
+
+    od["schedule_type"] = "now"
+    od["scheduled_time_text"] = None
+    return await finalize_order(update.message, context)
+
 # ====== /start ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init_db()
@@ -615,6 +626,7 @@ async def cust_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     od["qty"] = chosen
 
+    # ✅ son o'zgarganda jami narx ham yangilanadi
     total = float(od.get("unit_price", 0.0)) * int(chosen)
 
     try:
@@ -714,10 +726,10 @@ async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         od["scheduled_time_text"] = None
         return await finalize_order(q.message, context)
 
-    # ✅ TUZATILDI: schedule vaqtida delivery reply keyboard bermaymiz
     await q.message.reply_text(
         "Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):",
-        parse_mode=ParseMode.MARKDOWN
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=kb_delivery_reply()
     )
     return CUSTOMER_SCHEDULE_TIME
 
@@ -960,13 +972,12 @@ def main():
 
             CUSTOMER_SCHEDULE: [
                 CallbackQueryHandler(callback_router, block=False),
+                MessageHandler(filters.Regex("^🟢 Hozir$"), cust_schedule_now_text),  # ✅ HOZIR (TEXT fallback)
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
                 MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
             ],
 
-            # ✅ TUZATILDI: schedule_time state'iga ham CallbackQueryHandler qo‘shildi
             CUSTOMER_SCHEDULE_TIME: [
-                CallbackQueryHandler(callback_router, block=False),
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
                 MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, cust_schedule_time),
@@ -974,7 +985,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
-        per_message=True,  # ✅ siz xohlagandek qoldirildi
+        per_message=True,  # ✅ callback’lar barqaror ishlashi uchun
     )
 
     app.add_handler(conv)
