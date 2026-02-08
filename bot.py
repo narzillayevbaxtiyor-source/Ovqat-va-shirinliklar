@@ -9,6 +9,7 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InputMediaPhoto,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -119,7 +120,12 @@ def now_iso():
     CUSTOMER_PHONE,
     CUSTOMER_SCHEDULE,
     CUSTOMER_SCHEDULE_TIME,
-) = range(15)
+    ADMIN_EDIT_PRICE,
+    ADMIN_EDIT_MINMAX,
+    ADMIN_EDIT_PHOTO1,
+    ADMIN_EDIT_PHOTO2,
+    CUSTOMER_CANCEL_CONFIRM,
+) = range(20)
 
 # ====== Keyboards ======
 def kb_admin_main():
@@ -160,17 +166,64 @@ def kb_qty(min_q, max_q, current):
             row = []
     if row:
         btns.append(row)
-    btns.append([InlineKeyboardButton("➡️ Keyingi", callback_data="cust:qty:next")])
+    btns.append([
+        InlineKeyboardButton("➡️ Keyingi", callback_data="cust:qty:next"),
+        InlineKeyboardButton("❌ Bekor qilish", callback_data="cust:cancel"),
+    ])
     return InlineKeyboardMarkup(btns)
+
+def kb_delivery_reply():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📍 Lokatsiya yuborish", request_location=True)],
+            ["✍️ Manzilni yozaman"],
+            ["🏠 Bosh menu", "❌ Buyurtmani bekor qilish"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+def kb_contact_reply():
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📞 Telefon raqam yuborish", request_contact=True)],
+            ["👤 Telegram nik qoldiraman"],
+            ["🏠 Bosh menu", "❌ Buyurtmani bekor qilish"],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+
+# ====== CUSTOMER: cancel / main menu ======
+async def cust_cancel_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("order", None)
+    await update.message.reply_text("❌ Buyurtma bekor qilindi.")
+    await update.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
+    return CUSTOMER_BROWSE
+
+async def cust_cancel_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    context.user_data.pop("order", None)
+    await q.message.reply_text("❌ Buyurtma bekor qilindi.")
+    await q.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
+    return CUSTOMER_BROWSE
+
+async def cust_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("order", None)
+    if update.message:
+        await update.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
+    else:
+        q = update.callback_query
+        await q.answer()
+        await q.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
+    return CUSTOMER_BROWSE
 
 # ====== /start ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     init_db()
     if is_admin(update):
-        await update.message.reply_text(
-            "👋 Admin panel",
-            reply_markup=kb_admin_main()
-        )
+        await update.message.reply_text("👋 Admin panel", reply_markup=kb_admin_main())
         return ADMIN_MENU
 
     await update.message.reply_text(
@@ -302,7 +355,10 @@ async def admin_show_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟢 Aktiv: {'Ha' if r['is_active'] else 'Yo‘q'}"
         )
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢/🔴 Aktivni almashtirish", callback_data=f"admin:toggle:{r['id']}")]
+            [InlineKeyboardButton("🟢/🔴 Aktivni almashtirish", callback_data=f"admin:toggle:{r['id']}")],
+            [InlineKeyboardButton("💰 Narxni tahrirlash", callback_data=f"admin:edit:{r['id']}:price"),
+             InlineKeyboardButton("🔢 Min/Max tahrirlash", callback_data=f"admin:edit:{r['id']}:minmax")],
+            [InlineKeyboardButton("🖼 Rasmlarni tahrirlash (2ta)", callback_data=f"admin:edit:{r['id']}:photos")],
         ])
         await q.message.reply_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     return ADMIN_MENU
@@ -324,6 +380,118 @@ async def admin_toggle_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.message.reply_text(f"✅ Item #{item_id} aktivligi o‘zgardi.")
     return ADMIN_MENU
 
+# ====== ADMIN: edit item (price/minmax/photos) ======
+async def admin_edit_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    _, _, item_id, field = q.data.split(":")
+    item_id = int(item_id)
+
+    con = db(); cur = con.cursor()
+    cur.execute("SELECT * FROM items WHERE id=?", (item_id,))
+    it = cur.fetchone()
+    con.close()
+    if not it:
+        await q.message.reply_text("❌ Mahsulot topilmadi.")
+        return ADMIN_MENU
+
+    context.user_data["edit_item_id"] = item_id
+
+    if field == "price":
+        await q.message.reply_text("Yangi narxni yozing (masalan: 25 yoki 25.5):")
+        return ADMIN_EDIT_PRICE
+
+    if field == "minmax":
+        await q.message.reply_text("Yangi Min va Max ni yozing. Format: `min max` (masalan: `1 10`)", parse_mode=ParseMode.MARKDOWN)
+        return ADMIN_EDIT_MINMAX
+
+    if field == "photos":
+        await q.message.reply_text("1-rasmni yuboring (galereyadan rasm):")
+        return ADMIN_EDIT_PHOTO1
+
+    return ADMIN_MENU
+
+async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item_id = context.user_data.get("edit_item_id")
+    if not item_id:
+        await update.message.reply_text("❌ Edit sessiya topilmadi.")
+        return ADMIN_MENU
+
+    try:
+        price = float(update.message.text.strip())
+        if price < 0:
+            raise ValueError()
+    except Exception:
+        await update.message.reply_text("❌ Narx noto‘g‘ri. Qayta yozing: 25 yoki 25.5")
+        return ADMIN_EDIT_PRICE
+
+    con = db(); cur = con.cursor()
+    cur.execute("UPDATE items SET price=? WHERE id=?", (price, item_id))
+    con.commit(); con.close()
+
+    await update.message.reply_text(f"✅ Mahsulot #{item_id} narxi yangilandi: {price}", reply_markup=kb_admin_main())
+    context.user_data.pop("edit_item_id", None)
+    return ADMIN_MENU
+
+async def admin_edit_minmax(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item_id = context.user_data.get("edit_item_id")
+    if not item_id:
+        await update.message.reply_text("❌ Edit sessiya topilmadi.")
+        return ADMIN_MENU
+
+    try:
+        parts = update.message.text.strip().split()
+        mn = int(parts[0]); mx = int(parts[1])
+        if mn < 1 or mx < mn:
+            raise ValueError()
+    except Exception:
+        await update.message.reply_text("❌ Format noto‘g‘ri. Masalan: `1 10`", parse_mode=ParseMode.MARKDOWN)
+        return ADMIN_EDIT_MINMAX
+
+    con = db(); cur = con.cursor()
+    cur.execute("UPDATE items SET min_qty=?, max_qty=? WHERE id=?", (mn, mx, item_id))
+    con.commit(); con.close()
+
+    await update.message.reply_text(f"✅ Mahsulot #{item_id} Min/Max yangilandi: {mn}–{mx}", reply_markup=kb_admin_main())
+    context.user_data.pop("edit_item_id", None)
+    return ADMIN_MENU
+
+async def admin_edit_photo1(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item_id = context.user_data.get("edit_item_id")
+    if not item_id:
+        await update.message.reply_text("❌ Edit sessiya topilmadi.")
+        return ADMIN_MENU
+
+    if not update.message.photo:
+        await update.message.reply_text("❌ Rasm yuboring (photo).")
+        return ADMIN_EDIT_PHOTO1
+
+    context.user_data["edit_photo1"] = update.message.photo[-1].file_id
+    await update.message.reply_text("2-rasmni yuboring (galereyadan rasm):")
+    return ADMIN_EDIT_PHOTO2
+
+async def admin_edit_photo2(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    item_id = context.user_data.get("edit_item_id")
+    p1 = context.user_data.get("edit_photo1")
+    if not item_id or not p1:
+        await update.message.reply_text("❌ Edit sessiya topilmadi.")
+        return ADMIN_MENU
+
+    if not update.message.photo:
+        await update.message.reply_text("❌ Rasm yuboring (photo).")
+        return ADMIN_EDIT_PHOTO2
+
+    p2 = update.message.photo[-1].file_id
+
+    con = db(); cur = con.cursor()
+    cur.execute("UPDATE items SET photo1_file_id=?, photo2_file_id=? WHERE id=?", (p1, p2, item_id))
+    con.commit(); con.close()
+
+    await update.message.reply_text(f"✅ Mahsulot #{item_id} rasmlari yangilandi.", reply_markup=kb_admin_main())
+    context.user_data.pop("edit_item_id", None)
+    context.user_data.pop("edit_photo1", None)
+    return ADMIN_MENU
+
 # ====== CUSTOMER FLOW ======
 async def cust_pick_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -337,7 +505,6 @@ async def cust_pick_cat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text("Hozircha bu bo‘limda mahsulot yo‘q.")
         return CUSTOMER_BROWSE
 
-    # list items with buttons
     for it in items[:25]:
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🛒 Buyurtma", callback_data=f"cust:item:{it['id']}")]
@@ -378,12 +545,10 @@ async def cust_open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "scheduled_time_text": None,
     }
 
-    # send 2 photos as album (media group)
     await context.bot.send_media_group(
         chat_id=q.message.chat_id,
         media=[
-            # caption only on first
-            __import__("telegram").InputMediaPhoto(
+            InputMediaPhoto(
                 it["photo1_file_id"],
                 caption=(
                     f"*{it['title']}*\n{it['description']}\n"
@@ -392,7 +557,7 @@ async def cust_open_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             ),
-            __import__("telegram").InputMediaPhoto(it["photo2_file_id"]),
+            InputMediaPhoto(it["photo2_file_id"]),
         ],
     )
 
@@ -412,16 +577,7 @@ async def cust_qty(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CUSTOMER_BROWSE
 
     if data == "next":
-        # go to delivery
-        kb = ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("📍 Lokatsiya yuborish", request_location=True)],
-                ["✍️ Manzilni yozaman"],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        await q.message.reply_text("Yetkazib berish uchun lokatsiya yuboring yoki manzilni qo‘lda yozing:", reply_markup=kb)
+        await q.message.reply_text("Yetkazib berish uchun lokatsiya yuboring yoki manzilni qo‘lda yozing:", reply_markup=kb_delivery_reply())
         return CUSTOMER_DELIVERY
 
     try:
@@ -447,39 +603,21 @@ async def cust_delivery(update: Update, context: ContextTypes.DEFAULT_TYPE):
         od["delivery_type"] = "location"
         od["lat"] = update.message.location.latitude
         od["lng"] = update.message.location.longitude
-        # contact
-        kb = ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("📞 Telefon raqam yuborish", request_contact=True)],
-                ["👤 Telegram nik qoldiraman"],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb)
+        await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb_contact_reply())
         return CUSTOMER_CONTACT
 
     txt = (update.message.text or "").strip()
     if txt == "✍️ Manzilni yozaman":
-        await update.message.reply_text("Manzilni yozing (mahalla/ko‘cha/uy raqami):")
+        await update.message.reply_text("Manzilni yozing (mahalla/ko‘cha/uy raqami):", reply_markup=kb_delivery_reply())
         return CUSTOMER_ADDRESS_TEXT
 
-    # if user typed address directly
     if txt:
         od["delivery_type"] = "address"
         od["address_text"] = txt
-        kb = ReplyKeyboardMarkup(
-            [
-                [KeyboardButton("📞 Telefon raqam yuborish", request_contact=True)],
-                ["👤 Telegram nik qoldiraman"],
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
-        await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb)
+        await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb_contact_reply())
         return CUSTOMER_CONTACT
 
-    await update.message.reply_text("Lokatsiya yuboring yoki manzilni yozing.")
+    await update.message.reply_text("Lokatsiya yuboring yoki manzilni yozing.", reply_markup=kb_delivery_reply())
     return CUSTOMER_DELIVERY
 
 async def cust_address_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -490,15 +628,7 @@ async def cust_address_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     od["delivery_type"] = "address"
     od["address_text"] = update.message.text.strip()
 
-    kb = ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("📞 Telefon raqam yuborish", request_contact=True)],
-            ["👤 Telegram nik qoldiraman"],
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True,
-    )
-    await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb)
+    await update.message.reply_text("Aloqa uchun telefon yuboring yoki telegram nik qoldiring:", reply_markup=kb_contact_reply())
     return CUSTOMER_CONTACT
 
 async def cust_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,23 +641,21 @@ async def cust_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         od["contact_type"] = "phone"
         od["phone"] = update.message.contact.phone_number
     else:
-        # user wants username
         if (update.message.text or "").strip() == "👤 Telegram nik qoldiraman":
-            await update.message.reply_text("Telegram nikingizni yozing (masalan: @username):")
+            await update.message.reply_text("Telegram nikingizni yozing (masalan: @username):", reply_markup=kb_contact_reply())
             return CUSTOMER_PHONE
-        # user typed username already
         txt = (update.message.text or "").strip()
         if txt.startswith("@"):
             od["contact_type"] = "username"
             od["tg_username"] = txt
         else:
-            await update.message.reply_text("Telefon yuboring yoki @username yozing.")
+            await update.message.reply_text("Telefon yuboring yoki @username yozing.", reply_markup=kb_contact_reply())
             return CUSTOMER_CONTACT
 
-    # schedule
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
-         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")]
+         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
+        [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
     ])
     await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb)
     return CUSTOMER_SCHEDULE
@@ -536,14 +664,15 @@ async def cust_username_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     od = context.user_data.get("order")
     txt = (update.message.text or "").strip()
     if not txt.startswith("@"):
-        await update.message.reply_text("Iltimos @username formatida yozing. Masalan: @Saudia0dan")
+        await update.message.reply_text("Iltimos @username formatida yozing. Masalan: @Saudia0dan", reply_markup=kb_contact_reply())
         return CUSTOMER_PHONE
     od["contact_type"] = "username"
     od["tg_username"] = txt
 
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
-         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")]
+         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
+        [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
     ])
     await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb)
     return CUSTOMER_SCHEDULE
@@ -563,7 +692,7 @@ async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         od["scheduled_time_text"] = None
         return await finalize_order(q.message, context)
 
-    await q.message.reply_text("Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):", parse_mode=ParseMode.MARKDOWN)
+    await q.message.reply_text("Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_delivery_reply())
     return CUSTOMER_SCHEDULE_TIME
 
 async def cust_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -572,7 +701,6 @@ async def cust_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("Buyurtma sessiyasi topilmadi. /start qiling.")
         return CUSTOMER_BROWSE
     od["scheduled_time_text"] = update.message.text.strip()
-    # finalize
     return await finalize_order(update.message, context)
 
 async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
@@ -581,7 +709,6 @@ async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
         await message.reply_text("Buyurtma sessiyasi topilmadi. /start qiling.")
         return CUSTOMER_BROWSE
 
-    user = message.chat if hasattr(message, "chat") else None
     u = message.from_user
 
     con = db(); cur = con.cursor()
@@ -619,7 +746,6 @@ async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
     order_id = cur.lastrowid
     con.commit(); con.close()
 
-    # notify admin
     lines = [
         f"📦 *Yangi buyurtma*  #{order_id}",
         f"👤 Mijoz: *{u.first_name}* (@{u.username})" if u.username else f"👤 Mijoz: *{u.first_name}*",
@@ -644,15 +770,12 @@ async def finalize_order(message, context: ContextTypes.DEFAULT_TYPE):
     if od["delivery_type"] == "location":
         await context.bot.send_location(chat_id=ADMIN_ID, latitude=od["lat"], longitude=od["lng"])
 
-    # confirm to customer
     await message.reply_text(
         f"✅ Buyurtmangiz qabul qilindi (ID: {order_id}). Holat o‘zgarishi admin tomonidan yuboriladi.",
         reply_markup=ReplyKeyboardMarkup([["🏠 Bosh menu"]], resize_keyboard=True)
     )
 
     context.user_data.pop("order", None)
-
-    # show categories again
     await message.reply_text("Yana buyurtma berish uchun bo‘lim tanlang:", reply_markup=kb_categories())
     return CUSTOMER_BROWSE
 
@@ -695,7 +818,6 @@ async def admin_set_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("UPDATE orders SET status=?, updated_at=? WHERE id=?", (st, now_iso(), order_id))
     con.commit(); con.close()
 
-    # notify customer
     try:
         await context.bot.send_message(
             chat_id=r["user_id"],
@@ -713,6 +835,18 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
 
+    # customer
+    if data == "cust:cancel":
+        return await cust_cancel_cb(update, context)
+    if data.startswith("cust:cat:"):
+        return await cust_pick_cat(update, context)
+    if data.startswith("cust:item:"):
+        return await cust_open_item(update, context)
+    if data.startswith("cust:qty:"):
+        return await cust_qty(update, context)
+    if data.startswith("cust:sched:"):
+        return await cust_schedule_pick(update, context)
+
     # admin
     if data == "admin:add:start":
         return await admin_add_start(update, context)
@@ -726,16 +860,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await admin_orders(update, context)
     if data.startswith("admin:st:"):
         return await admin_set_status(update, context)
-
-    # customer
-    if data.startswith("cust:cat:"):
-        return await cust_pick_cat(update, context)
-    if data.startswith("cust:item:"):
-        return await cust_open_item(update, context)
-    if data.startswith("cust:qty:"):
-        return await cust_qty(update, context)
-    if data.startswith("cust:sched:"):
-        return await cust_schedule_pick(update, context)
+    if data.startswith("admin:edit:"):
+        return await admin_edit_router(update, context)
 
     await q.answer()
     return ConversationHandler.END
@@ -748,7 +874,9 @@ def main():
     conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
+            # ADMIN
             ADMIN_MENU: [CallbackQueryHandler(callback_router)],
+
             ADMIN_ADD_TITLE: [
                 CallbackQueryHandler(callback_router),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, admin_add_title),
@@ -759,17 +887,58 @@ def main():
             ADMIN_ADD_PHOTO1: [MessageHandler(filters.PHOTO, admin_add_photo1)],
             ADMIN_ADD_PHOTO2: [MessageHandler(filters.PHOTO, admin_add_photo2)],
 
+            ADMIN_EDIT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_price)],
+            ADMIN_EDIT_MINMAX: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_edit_minmax)],
+            ADMIN_EDIT_PHOTO1: [MessageHandler(filters.PHOTO, admin_edit_photo1)],
+            ADMIN_EDIT_PHOTO2: [MessageHandler(filters.PHOTO, admin_edit_photo2)],
+
+            # CUSTOMER
             CUSTOMER_BROWSE: [
                 CallbackQueryHandler(callback_router),
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), start),
             ],
-            CUSTOMER_PICK_QTY: [CallbackQueryHandler(callback_router)],
-            CUSTOMER_DELIVERY: [MessageHandler(filters.LOCATION | (filters.TEXT & ~filters.COMMAND), cust_delivery)],
-            CUSTOMER_ADDRESS_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, cust_address_text)],
-            CUSTOMER_CONTACT: [MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), cust_contact)],
-            CUSTOMER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, cust_username_text)],
-            CUSTOMER_SCHEDULE: [CallbackQueryHandler(callback_router)],
-            CUSTOMER_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, cust_schedule_time)],
+
+            CUSTOMER_PICK_QTY: [
+                CallbackQueryHandler(callback_router),
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+            ],
+
+            CUSTOMER_DELIVERY: [
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+                MessageHandler(filters.LOCATION | (filters.TEXT & ~filters.COMMAND), cust_delivery),
+            ],
+
+            CUSTOMER_ADDRESS_TEXT: [
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, cust_address_text),
+            ],
+
+            CUSTOMER_CONTACT: [
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+                MessageHandler(filters.CONTACT | (filters.TEXT & ~filters.COMMAND), cust_contact),
+            ],
+
+            CUSTOMER_PHONE: [
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, cust_username_text),
+            ],
+
+            CUSTOMER_SCHEDULE: [
+                CallbackQueryHandler(callback_router),
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+            ],
+
+            CUSTOMER_SCHEDULE_TIME: [
+                MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
+                MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, cust_schedule_time),
+            ],
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
@@ -780,3 +949,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```0
