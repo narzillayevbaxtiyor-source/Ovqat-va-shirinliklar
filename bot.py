@@ -202,10 +202,10 @@ def kb_contact_reply():
         one_time_keyboard=True,
     )
 
+# ✅ TUZATILDI: “🟢 Hozir” olib tashlandi, faqat vaqt belgilash qoldi
 def kb_schedule_inline():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Hozir", callback_data="cust:sched:now"),
-         InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
+        [InlineKeyboardButton("🕒 Belgilangan vaqtda", callback_data="cust:sched:scheduled")],
         [InlineKeyboardButton("❌ Buyurtmani bekor qilish", callback_data="cust:cancel")]
     ])
 
@@ -233,17 +233,6 @@ async def cust_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         await q.message.reply_text("Bosh menyu:", reply_markup=kb_categories())
     return CUSTOMER_BROWSE
-
-# ✅ "🟢 Hozir" matn bo‘lib kelsa ham ishlashi uchun (INLINE callback ba’zan yutilib qoladi)
-async def cust_schedule_now_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    od = context.user_data.get("order")
-    if not od:
-        await update.message.reply_text("Buyurtma topilmadi. /start qiling.")
-        return CUSTOMER_BROWSE
-
-    od["schedule_type"] = "now"
-    od["scheduled_time_text"] = None
-    return await finalize_order(update.message, context)
 
 # ====== /start ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -288,7 +277,10 @@ async def admin_add_pick_cat(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def admin_add_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["add_item"]["title"] = update.message.text.strip()
-    await update.message.reply_text("Qisqa ta’rif yozing (ixtiyoriy). Bo‘sh qoldirish uchun `-` yozing:", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "Qisqa ta’rif yozing (ixtiyoriy). Bo‘sh qoldirish uchun `-` yozing:",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return ADMIN_ADD_DESC
 
 async def admin_add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -307,7 +299,10 @@ async def admin_add_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADMIN_ADD_PRICE
 
     context.user_data["add_item"]["price"] = price
-    await update.message.reply_text("Min va Max buyurtma sonini yozing. Format: `min max` (masalan: `1 10`)", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        "Min va Max buyurtma sonini yozing. Format: `min max` (masalan: `1 10`)",
+        parse_mode=ParseMode.MARKDOWN
+    )
     return ADMIN_ADD_MINMAX
 
 async def admin_add_minmax(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -428,7 +423,10 @@ async def admin_edit_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ADMIN_EDIT_PRICE
 
     if field == "minmax":
-        await q.message.reply_text("Yangi Min va Max ni yozing. Format: `min max` (masalan: `1 10`)", parse_mode=ParseMode.MARKDOWN)
+        await q.message.reply_text(
+            "Yangi Min va Max ni yozing. Format: `min max` (masalan: `1 10`)",
+            parse_mode=ParseMode.MARKDOWN
+        )
         return ADMIN_EDIT_MINMAX
 
     if field == "photos":
@@ -455,7 +453,10 @@ async def admin_edit_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("UPDATE items SET price=? WHERE id=?", (price, item_id))
     con.commit(); con.close()
 
-    await update.message.reply_text(f"✅ Mahsulot #{item_id} narxi yangilandi: {fmt_money(price)}", reply_markup=kb_admin_main())
+    await update.message.reply_text(
+        f"✅ Mahsulot #{item_id} narxi yangilandi: {fmt_money(price)}",
+        reply_markup=kb_admin_main()
+    )
     context.user_data.pop("edit_item_id", None)
     return ADMIN_MENU
 
@@ -478,7 +479,10 @@ async def admin_edit_minmax(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur.execute("UPDATE items SET min_qty=?, max_qty=? WHERE id=?", (mn, mx, item_id))
     con.commit(); con.close()
 
-    await update.message.reply_text(f"✅ Mahsulot #{item_id} Min/Max yangilandi: {mn}–{mx}", reply_markup=kb_admin_main())
+    await update.message.reply_text(
+        f"✅ Mahsulot #{item_id} Min/Max yangilandi: {mn}–{mx}",
+        reply_markup=kb_admin_main()
+    )
     context.user_data.pop("edit_item_id", None)
     return ADMIN_MENU
 
@@ -711,6 +715,7 @@ async def cust_username_text(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await update.message.reply_text("Buyurtma vaqtini tanlang:", reply_markup=kb_schedule_inline())
     return CUSTOMER_SCHEDULE
 
+# ✅ TUZATILDI: "now" yo'q, faqat scheduled ishlaydi
 async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -719,12 +724,7 @@ async def cust_schedule_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await q.message.reply_text("Buyurtma sessiyasi topilmadi. /start qiling.")
         return CUSTOMER_BROWSE
 
-    kind = q.data.split(":")[-1]
-    od["schedule_type"] = kind
-
-    if kind == "now":
-        od["scheduled_time_text"] = None
-        return await finalize_order(q.message, context)
+    od["schedule_type"] = "scheduled"
 
     await q.message.reply_text(
         "Vaqtni yozing (masalan: `18:30` yoki `Bugun 20:00`):",
@@ -972,7 +972,6 @@ def main():
 
             CUSTOMER_SCHEDULE: [
                 CallbackQueryHandler(callback_router, block=False),
-                MessageHandler(filters.Regex("^🟢 Hozir$"), cust_schedule_now_text),  # ✅ HOZIR (TEXT fallback)
                 MessageHandler(filters.Regex("^🏠 Bosh menu$"), cust_main_menu),
                 MessageHandler(filters.Regex("^❌ Buyurtmani bekor qilish$"), cust_cancel_text),
             ],
@@ -985,7 +984,7 @@ def main():
         },
         fallbacks=[CommandHandler("start", start)],
         allow_reentry=True,
-        per_message=True,  # ✅ callback’lar barqaror ishlashi uchun
+        per_message=False,  # ✅ TUZATILDI: callback ishlashi uchun barqaror
     )
 
     app.add_handler(conv)
